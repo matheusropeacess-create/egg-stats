@@ -1,0 +1,57 @@
+// POST /api/ingest/odds-next?league=39&limit=20
+app.post("/api/ingest/odds-next", async (req, res) => {
+  try {
+    const { league, limit } = req.query;
+    if (!league) return res.status(400).json({ ok: false, error: "Informe league" });
+
+    // pega próximos jogos do DB
+    const nextMatches = await query(
+      `
+      select external_match_id
+      from matches
+      where league_id = $1
+        and match_date > now()
+        and (status is null or status <> 'FT')
+      order by match_date asc
+      limit $2
+      `,
+      [Number(league), Number(limit || 20)]
+    );
+
+    let fixturesChecked = 0;
+    let snapshotsSaved = 0;
+    let noOdds = 0;
+
+    for (const row of nextMatches.rows) {
+      const fixtureId = Number(row.external_match_id);
+      if (!fixtureId) continue;
+
+      fixturesChecked++;
+
+      const best = await fetchBest1x2OddsForFixture(fixtureId);
+      if (!best) {
+        noOdds++;
+        continue;
+      }
+
+      await query(
+        `insert into odds_snapshots (
+          external_match_id, league_id, market, bookmaker, odd_home, odd_draw, odd_away
+        ) values ($1,$2,$3,$4,$5,$6,$7)`,
+        [fixtureId, Number(league), "1X2", best.bookmaker, best.oddHome, best.oddDraw, best.oddAway]
+      );
+
+      snapshotsSaved++;
+    }
+
+    res.json({
+      ok: true,
+      league: Number(league),
+      fixturesChecked,
+      snapshotsSaved,
+      noOdds,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || String(err) });
+  }
+});
