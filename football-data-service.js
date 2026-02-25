@@ -1,92 +1,67 @@
 /**
- * football-data-service.js
- *
- * Busca partidas na football-data.org v4.
- *
- * MUDANÇAS em relação à versão anterior:
- *   - fetchUpcomingMatches estava hardcoded para PL apenas → agora busca TODAS
- *     as ligas do LEAGUE_MAP em paralelo (Promise.allSettled)
- *   - Tratamento de erro por liga (uma liga falhando não derruba o resto)
- *   - fetchRecentFinishedMatches agora aceita competition opcional
- *   - Deduplicação por match.id no merge
- *   - Constante SUPPORTED_COMPETITIONS exportada para reuso
+ * football-data-service.js — busca partidas em janela de 14 dias
  */
-
 import "dotenv/config";
 
 const KEY      = process.env.FOOTBALL_DATA_KEY;
 const BASE_URL = "https://api.football-data.org/v4";
 
-// Ligas suportadas (deve estar em sync com league-mapping.js)
 export const SUPPORTED_COMPETITIONS = ["PL", "SA", "PD", "BL1", "FL1", "BSA", "DED", "PPL"];
 
 async function fdGet(path) {
   if (!KEY) throw new Error("FOOTBALL_DATA_KEY ausente no .env");
-
   const response = await fetch(`${BASE_URL}${path}`, {
     headers: { "X-Auth-Token": KEY },
   });
-
   if (!response.ok) {
     const txt = await response.text().catch(() => "");
-    throw new Error(`football-data ${response.status} ${response.statusText} — ${path} — ${txt}`.trim());
+    throw new Error(`football-data ${response.status} — ${path} — ${txt}`.trim());
   }
-
   return response.json();
 }
 
 /**
- * Retorna TODAS as partidas agendadas das ligas suportadas.
- * Busca em paralelo e ignora ligas que retornarem erro (ex: tier gratuito).
+ * Busca partidas agendadas nos próximos 14 dias em todas as ligas.
  */
 export async function fetchUpcomingMatches() {
+  const dateFrom = new Date();
+  const dateTo   = new Date();
+  dateTo.setDate(dateTo.getDate() + 14);
+
+  const fmt = d => d.toISOString().slice(0, 10);
+
   const results = await Promise.allSettled(
     SUPPORTED_COMPETITIONS.map(code =>
-      fdGet(`/competitions/${code}/matches?status=SCHEDULED`)
+      fdGet(`/competitions/${code}/matches?status=SCHEDULED&dateFrom=${fmt(dateFrom)}&dateTo=${fmt(dateTo)}`)
         .then(data => (data.matches ?? []).map(m => ({ ...m, _competitionCode: code })))
     )
   );
 
   const matches = [];
-  const seen = new Set();
+  const seen    = new Set();
 
   for (const r of results) {
     if (r.status === "rejected") {
-      console.warn("[football-data] liga falhou:", r.reason?.message);
+      console.warn("[football-data] falhou:", r.reason?.message);
       continue;
     }
     for (const m of r.value) {
-      if (!seen.has(m.id)) {
-        seen.add(m.id);
-        matches.push(m);
-      }
+      if (!seen.has(m.id)) { seen.add(m.id); matches.push(m); }
     }
   }
 
-  console.log(`[football-data] ${matches.length} partidas agendadas`);
+  console.log(`[football-data] ${matches.length} partidas nos próximos 14 dias`);
   return matches;
 }
 
-/**
- * Retorna partidas finalizadas recentes.
- * @param {string} [competition] - código de competição opcional para filtrar
- */
 export async function fetchRecentFinishedMatches(competition = null) {
   const path = competition
     ? `/competitions/${competition}/matches?status=FINISHED`
     : `/matches?status=FINISHED`;
-
   const data = await fdGet(path);
   return data.matches ?? [];
 }
 
-/**
- * Retorna histórico de partidas finalizadas de uma liga para treino do modelo.
- * Busca as últimas `seasons` temporadas para ter volume suficiente.
- *
- * @param {string} competitionCode - ex: "PL"
- * @param {number[]} seasons       - ex: [2022, 2023, 2024]
- */
 export async function fetchHistoricalMatches(competitionCode, seasons) {
   const results = await Promise.allSettled(
     seasons.map(season =>
@@ -94,12 +69,10 @@ export async function fetchHistoricalMatches(competitionCode, seasons) {
         .then(data => data.matches ?? [])
     )
   );
-
   const matches = [];
   for (const r of results) {
     if (r.status === "fulfilled") matches.push(...r.value);
     else console.warn(`[football-data] histórico falhou:`, r.reason?.message);
   }
-
   return matches;
 }

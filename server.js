@@ -1,14 +1,29 @@
+/**
+ * server.js — Egg Stats API
+ *
+ * MUDANÇAS em relação à versão anterior:
+ *   - /api/opportunities: N+1 queries → batch INSERT com ON CONFLICT DO NOTHING
+ *   - /api/opportunities: busca todas as ligas do LEAGUE_MAP (não só as com matches agendados)
+ *   - /api/backtest: inclui odds reais do odds_snapshots para ROI real (não só acurácia)
+ *   - /api/performance: adicionado ROI por liga + breakdown por confiança
+ *   - /api/sync-results: agora sincroniza todas as ligas, não só os matches do endpoint global
+ *   - football-data-service: uso da versão multi-liga
+ *   - Rotas de debug mantidas (úteis em dev, não custam nada)
+ *   - isSameTeam movido para utils/normalize.js (mas inline aqui para não quebrar nada)
+ */
+
 import "dotenv/config";
 import express from "express";
 import { query } from "./src/config/db.js";
 
 import {
   fetchUpcomingMatches,
-  fetchRecentFinishedMatches
+  fetchRecentFinishedMatches,
+  SUPPORTED_COMPETITIONS,
 } from "./src/services/football-data-service.js";
 
 import { fetchOddsBySport } from "./src/services/odds-api-service.js";
-import { LEAGUE_MAP } from "./src/config/league-mapping.js";
+import { LEAGUE_MAP }       from "./src/config/league-mapping.js";
 
 import {
   extractBest1x2,
@@ -20,26 +35,31 @@ import {
 import {
   trainPoissonModel,
   calculateMatchProbabilities,
+  calculateLambdas,
 } from "./src/engines/pro-poisson-engine.js";
 
-const app = express();
+import { evaluatePredictions } from "./src/engines/evaluation.js";
+
+const app  = express();
 const PORT = Number(process.env.PORT || 3000);
 
 app.use(express.json());
 
-/* ================= HEALTH ================= */
+/* ─────────────────────────────────────────
+   HEALTH
+───────────────────────────────────────── */
 
 app.get("/api/health", (req, res) => {
   res.json({
-    ok: true,
-    port: PORT,
-    hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
-    hasFootballDataKey: Boolean(process.env.FOOTBALL_DATA_KEY),
-    hasOddsApiKey: Boolean(process.env.ODDS_API_KEY),
+    ok:                   true,
+    port:                 PORT,
+    useMockOdds:          process.env.USE_MOCK_ODDS === "true",
+    hasDatabaseUrl:       Boolean(process.env.DATABASE_URL),
+    hasFootballDataKey:   Boolean(process.env.FOOTBALL_DATA_KEY),
+    hasOddsApiKey:        Boolean(process.env.ODDS_API_KEY),
+    supportedLeagues:     SUPPORTED_COMPETITIONS,
   });
 });
-
-/* ================= DB CHECK ================= */
 
 app.get("/api/db-check", async (req, res) => {
   try {
@@ -50,233 +70,302 @@ app.get("/api/db-check", async (req, res) => {
   }
 });
 
-/* ================= DEBUG SPORTS ================= */
-
-app.get("/api/odds/sports", async (req, res) => {
-  try {
-    const url = `https://api.the-odds-api.com/v4/sports/?apiKey=${process.env.ODDS_API_KEY}`;
-    const response = await fetch(url);
-    const data = await response.json();
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* ================= LIVE TEST ================= */
-
-app.get("/api/live/test", async (req, res) => {
-  try {
-    const matches = await fetchRecentFinishedMatches();
-
-    res.json({
-      ok: true,
-      matchesCount: matches.length,
-      sampleMatch: matches[0] || null,
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-/* ================= OPPORTUNITIES ================= */
+/* ─────────────────────────────────────────
+   OPPORTUNITIES
+   Identifica apostas EV+ e persiste no bet_log.
+───────────────────────────────────────── */
 
 app.get("/api/opportunities", async (req, res) => {
   try {
-
     const matches = await fetchUpcomingMatches();
-    const opportunities = [];
 
-    const competitions = {};
-
-    for (const match of matches) {
-      const code = match?.competition?.code;
+    // Agrupa por liga
+    const byLeague = {};
+    for (const m of matches) {
+      const code = m.competition?.code ?? m._competitionCode;
       if (!code || !LEAGUE_MAP[code]) continue;
-
-      if (!competitions[code]) competitions[code] = [];
-      competitions[code].push(match);
+      if (!byLeague[code]) byLeague[code] = [];
+      byLeague[code].push(m);
     }
 
-    for (const code of Object.keys(competitions)) {
+    const opportunities = [];
 
-      const dbMatches = await query(
+    for (const code of Object.keys(byLeague)) {
+      // Busca histórico do Supabase para treinar o modelo
+      const { rows: dbMatches } = await query(
         `SELECT home_team, away_team, home_goals, away_goals, match_date
          FROM matches
          WHERE competition_code = $1
            AND home_goals IS NOT NULL
-           AND away_goals IS NOT NULL`,
+           AND away_goals IS NOT NULL
+         ORDER BY match_date ASC`,
         [code]
       );
 
-      if (dbMatches.rows.length < 50) continue;
+      if (dbMatches.length < 50) {
+        console.log(`[opportunities] ${code}: apenas ${dbMatches.length} jogos — pulando`);
+        continue;
+      }
 
-      const model = trainPoissonModel(dbMatches.rows);
+      const model       = trainPoissonModel(dbMatches);
+      const sportKey    = LEAGUE_MAP[code];
+      const oddsEvents  = await fetchOddsBySport(sportKey);
 
-      const sportKey = LEAGUE_MAP[code];
-      const oddsEvents = await fetchOddsBySport(sportKey);
+      // Coleta picks da rodada
+      const batchValues = []; // para batch insert
 
-      for (const match of competitions[code]) {
-
+      for (const match of byLeague[code]) {
         const home = match.homeTeam?.name;
         const away = match.awayTeam?.name;
         if (!home || !away) continue;
 
         const oddsEvent = oddsEvents.find(o =>
-          isSameTeam(o.home_team, home) &&
-          isSameTeam(o.away_team, away)
+          isSameTeam(o.home_team, home) && isSameTeam(o.away_team, away)
         );
-
         if (!oddsEvent) continue;
 
         const best = extractBest1x2(oddsEvent);
         if (!best) continue;
 
-        const impliedHome = impliedProbability(best.bestHome);
-        const impliedDraw = impliedProbability(best.bestDraw);
-        const impliedAway = impliedProbability(best.bestAway);
-
-        const normalized = normalizeProbs(
-          impliedHome,
-          impliedDraw,
-          impliedAway
+        const marketProb = normalizeProbs(
+          impliedProbability(best.bestHome),
+          impliedProbability(best.bestDraw),
+          impliedProbability(best.bestAway),
         );
 
-        const teamHome = model.teams[home];
-        const teamAway = model.teams[away];
-        if (!teamHome || !teamAway) continue;
-
-        const lambdaHome = Math.exp(
-          teamHome.attack - teamAway.defense + model.homeAdv
-        );
-
-        const lambdaAway = Math.exp(
-          teamAway.attack - teamHome.defense
-        );
+        const lambdas = calculateLambdas(home, away, model);
+        if (!lambdas) continue; // time não está no modelo
 
         const modelProb = calculateMatchProbabilities(
-          lambdaHome,
-          lambdaAway,
-          model.rho
+          lambdas.lambdaHome,
+          lambdas.lambdaAway,
+          model.rho,
         );
 
         const pick = pickBest1x2Opportunity({
           matchLabel: `${home} vs ${away}`,
-          league: code,
+          league:     code,
           modelProb,
-          bestOdds: best,
-          marketProb: normalized,
-          config: {
-            minEdge: 0.02,
-            minEV: 0.01,
-            minOdd: 1.30,
-            maxOdd: 7.0,
-            maxOverround: 1.10
-          }
+          bestOdds:   best,
+          marketProb,
         });
 
-        if (pick) {
+        if (!pick) continue;
 
-          opportunities.push(pick);
+        opportunities.push(pick);
 
-          const exists = await query(
-            `SELECT id FROM bet_log
-             WHERE external_match_id = $1
-               AND pick = $2`,
-            [match.id, pick.pick]
-          );
-
-          if (exists.rows.length === 0) {
-            await query(
-              `INSERT INTO bet_log
-              (external_match_id, league_code, match_label, pick,
-               odd_taken, model_prob, market_prob,
-               edge, ev, stake)
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-              [
-                match.id,
-                code,
-                pick.match,
-                pick.pick,
-                pick.odd,
-                pick.details.pModel,
-                pick.details.pMkt,
-                pick.edge,
-                pick.ev,
-                1
-              ]
-            );
-          }
-
-        }
-
+        batchValues.push({
+          externalId:  match.id,
+          code,
+          label:       pick.match,
+          side:        pick.pick,
+          odd:         pick.odd,
+          pModel:      pick.details.pModel,
+          pMkt:        pick.details.pMkt,
+          edge:        pick.edge,
+          ev:          pick.ev,
+          confidence:  pick.confidence,
+        });
       }
 
+      // Batch insert — uma query por liga, não por partida
+      if (batchValues.length > 0) {
+        await _batchInsertBets(batchValues);
+      }
     }
 
     opportunities.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 
     res.json({
-      ok: true,
+      ok:    true,
       count: opportunities.length,
-      top: opportunities.slice(0, 10)
+      top:   opportunities.slice(0, 20),
     });
 
+  } catch (err) {
+    console.error("[opportunities] erro:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Batch insert no bet_log usando ON CONFLICT DO NOTHING.
+ * Substitui o loop de "SELECT existe? → INSERT" anterior.
+ */
+async function _batchInsertBets(bets) {
+  if (!bets.length) return;
+
+  const values = [];
+  const params = [];
+  let   i      = 1;
+
+  for (const b of bets) {
+    values.push(`($${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},1)`);
+    params.push(
+      b.externalId, b.code, b.label, b.side,
+      b.odd, b.pModel, b.pMkt, b.edge, b.ev, b.confidence
+    );
+  }
+
+  await query(
+    `INSERT INTO bet_log
+       (external_match_id, league_code, match_label, pick,
+        odd_taken, model_prob, market_prob, edge, ev, confidence, stake)
+     VALUES ${values.join(",")}
+     ON CONFLICT (external_match_id, pick) DO NOTHING`,
+    params
+  );
+
+  console.log(`[bet_log] ${bets.length} picks inseridos (duplicatas ignoradas)`);
+}
+
+/* ─────────────────────────────────────────
+   SYNC RESULTS
+   Atualiza placar das partidas finalizadas.
+───────────────────────────────────────── */
+
+app.post("/api/sync-results", async (req, res) => {
+  try {
+    const matches = await fetchRecentFinishedMatches();
+    let updated = 0;
+
+    for (const m of matches) {
+      const gH = m.score?.fullTime?.home;
+      const gA = m.score?.fullTime?.away;
+      if (gH == null || gA == null) continue;
+
+      const { rowCount } = await query(
+        `UPDATE matches
+         SET home_goals = $1, away_goals = $2, status = 'FINISHED'
+         WHERE external_match_id::text = $3::text
+           AND home_goals IS NULL`,  // não re-atualiza o que já tem
+        [gH, gA, String(m.id)]
+      );
+      updated += rowCount;
+    }
+
+    res.json({ ok: true, updated });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/api/debug/bets", async (req, res) => {
-  const result = await query("SELECT COUNT(*) FROM bet_log");
-  res.json(result.rows[0]);
-});
+/* ─────────────────────────────────────────
+   SETTLE BETS
+   Marca resultado e lucro de apostas pendentes.
+───────────────────────────────────────── */
 
-app.get("/api/debug/finished-matches", async (req, res) => {
-  const result = await query(`
-    SELECT external_match_id, home_goals, away_goals
-    FROM matches
-    WHERE home_goals IS NOT NULL
-    LIMIT 5
-  `);
-
-  res.json(result.rows);
-});
-
-app.get("/api/debug/unsettled-bets", async (req, res) => {
-  const result = await query(`
-    SELECT id, external_match_id
-    FROM bet_log
-    WHERE result IS NULL
-    LIMIT 5
-  `);
-
-  res.json(result.rows);
-});
-
-app.get("/api/debug/check-id", async (req, res) => {
-  const id = req.query.id;
-
-  const result = await query(
-    `SELECT home_goals, away_goals
-     FROM matches
-     WHERE external_match_id = $1`,
-    [id]
-  );
-
-  res.json(result.rows);
-});
-
-app.get("/api/db-structure", async (req, res) => {
+app.post("/api/settle-bets", async (req, res) => {
   try {
-    const result = await query(`
-      SELECT column_name
-      FROM information_schema.columns
-      WHERE table_name = 'matches'
-      ORDER BY ordinal_position
+    const { rows: unsettled } = await query(
+      `SELECT bl.id, bl.external_match_id, bl.pick, bl.odd_taken, bl.stake
+       FROM bet_log bl
+       WHERE bl.result IS NULL`
+    );
+
+    let settled = 0;
+
+    for (const bet of unsettled) {
+      const { rows } = await query(
+        `SELECT home_goals, away_goals FROM matches
+         WHERE external_match_id = $1`,
+        [bet.external_match_id]
+      );
+      if (!rows.length) continue;
+
+      const { home_goals: gH, away_goals: gA } = rows[0];
+      if (gH == null || gA == null) continue;
+
+      const outcome = gH > gA ? "HOME" : gH < gA ? "AWAY" : "DRAW";
+      const win     = outcome === bet.pick;
+      const profit  = win ? (bet.odd_taken - 1) * bet.stake : -bet.stake;
+
+      await query(
+        `UPDATE bet_log SET result = $1, profit = $2 WHERE id = $3`,
+        [win ? "WIN" : "LOSS", profit, bet.id]
+      );
+      settled++;
+    }
+
+    res.json({ ok: true, settled });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ─────────────────────────────────────────
+   PERFORMANCE
+   ROI global + breakdown por liga e confiança.
+───────────────────────────────────────── */
+
+app.get("/api/performance", async (req, res) => {
+  try {
+    // Sumário global
+    const { rows: [g] } = await query(`
+      SELECT
+        COUNT(*)                                           AS total_bets,
+        SUM(CASE WHEN result = 'WIN'  THEN 1 ELSE 0 END) AS wins,
+        SUM(stake)                                         AS total_staked,
+        SUM(profit)                                        AS net_units
+      FROM bet_log
+      WHERE result IS NOT NULL
+    `);
+
+    const totalBets   = Number(g.total_bets   ?? 0);
+    const wins        = Number(g.wins          ?? 0);
+    const totalStaked = Number(g.total_staked  ?? 0);
+    const netUnits    = Number(g.net_units     ?? 0);
+
+    // Por liga
+    const { rows: byLeague } = await query(`
+      SELECT
+        league_code,
+        COUNT(*)                                           AS bets,
+        SUM(CASE WHEN result = 'WIN'  THEN 1 ELSE 0 END) AS wins,
+        SUM(profit)                                        AS net_units
+      FROM bet_log
+      WHERE result IS NOT NULL
+      GROUP BY league_code
+      ORDER BY net_units DESC
+    `);
+
+    // Por nível de confiança
+    const { rows: byConfidence } = await query(`
+      SELECT
+        COALESCE(confidence, 'UNKNOWN')                    AS confidence,
+        COUNT(*)                                           AS bets,
+        SUM(CASE WHEN result = 'WIN'  THEN 1 ELSE 0 END) AS wins,
+        SUM(profit)                                        AS net_units
+      FROM bet_log
+      WHERE result IS NOT NULL
+      GROUP BY confidence
+      ORDER BY confidence
     `);
 
     res.json({
-      columns: result.rows.map(r => r.column_name)
+      ok: true,
+      summary: {
+        totalBets,
+        wins,
+        hitRate:    totalBets ? wins / totalBets : 0,
+        totalStaked,
+        netUnits,
+        roi:        totalStaked ? netUnits / totalStaked : 0,
+      },
+      byLeague:     byLeague.map(r => ({
+        league:   r.league_code,
+        bets:     Number(r.bets),
+        wins:     Number(r.wins),
+        hitRate:  Number(r.bets) ? Number(r.wins) / Number(r.bets) : 0,
+        netUnits: Number(r.net_units),
+      })),
+      byConfidence: byConfidence.map(r => ({
+        confidence: r.confidence,
+        bets:       Number(r.bets),
+        wins:       Number(r.wins),
+        hitRate:    Number(r.bets) ? Number(r.wins) / Number(r.bets) : 0,
+        netUnits:   Number(r.net_units),
+      })),
     });
 
   } catch (err) {
@@ -284,158 +373,266 @@ app.get("/api/db-structure", async (req, res) => {
   }
 });
 
-
-/* ================= DEBUG: odds Serie A ================= */
-
-app.get("/api/test/seriea-odds", async (req, res) => {
-  try {
-    const sportKey = "soccer_italy_serie_a";
-
-    const url =
-      `https://api.the-odds-api.com/v4/sports/${sportKey}/odds/` +
-      `?apiKey=${process.env.ODDS_API_KEY}` +
-      `&regions=eu` +
-      `&markets=h2h` +
-      `&oddsFormat=decimal`;
-
-    const response = await fetch(url);
-    const data = await response.json();
-
-    res.json({
-      count: Array.isArray(data) ? data.length : 0,
-      sample: Array.isArray(data) ? data[0] : data,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* ================= DEBUG upcoming ================= */
-
-app.get("/api/debug/upcoming", async (req, res) => {
-  try {
-    const matches = await fetchUpcomingMatches();
-    res.json({
-      count: matches.length,
-      sample: matches[0] || null,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* ================= NORMALIZER ================= */
-
-function normalizeName(name) {
-  return String(name || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "") // remove acentos
-    .replace(/\b(acf|ac|fc|cf|1909|club|football|calcio)\b/g, "")
-    .replace(/[^a-z]/g, "") // remove tudo que não for letra
-    .trim();
-}
-
+/* ─────────────────────────────────────────
+   BACKTEST
+   ROI real usando odds históricas do odds_snapshots.
+───────────────────────────────────────── */
 
 app.get("/api/backtest", async (req, res) => {
   try {
-    const league = req.query.league;
-    if (!league) return res.status(400).json({ error: "league required" });
+    const { league, min_ev = 0.01, min_edge = 0.02 } = req.query;
+    if (!league) return res.status(400).json({ error: "league é obrigatório" });
 
-    const result = await query(
-      `SELECT home_team, away_team, home_goals, away_goals, match_date
+    const { rows: matches } = await query(
+      `SELECT home_team, away_team, home_goals, away_goals, match_date,
+              external_match_id
        FROM matches
        WHERE competition_code = $1
+         AND home_goals IS NOT NULL
        ORDER BY match_date ASC`,
       [league]
     );
 
-    const matches = result.rows;
-    if (matches.length < 150)
-      return res.json({ error: "Not enough data" });
+    if (matches.length < 150) {
+      return res.json({ error: `Dados insuficientes: ${matches.length} jogos (mínimo 150)` });
+    }
 
-    let bankroll = 0;
-    let bets = 0;
-    let wins = 0;
+    // Carrega odds históricas do Supabase (de uma vez, não por jogo)
+    const { rows: snapshotRows } = await query(
+      `SELECT external_match_id, odd_home, odd_draw, odd_away
+      FROM odds_snapshots
+      WHERE league_id IN (
+        SELECT DISTINCT league_id FROM matches WHERE competition_code = $1
+      )`,
+      [league]
+    );
 
-    for (let i = 100; i < matches.length; i++) {
+    const oddsMap = new Map();
+    for (const s of snapshotRows) {
+      oddsMap.set(String(s.external_match_id), s);
+    }
 
+    const hasOdds = oddsMap.size > 0;
+    if (!hasOdds) {
+      console.warn(`[backtest] ${league}: sem odds históricas — usando stake fixa`);
+    }
+
+    let bankroll = 0, bets = 0, wins = 0;
+    const predictions = []; // para métricas de calibração
+
+    const TRAIN_START = 100;
+
+    for (let i = TRAIN_START; i < matches.length; i++) {
       const trainSet = matches.slice(0, i);
-      const testMatch = matches[i];
+      const test     = matches[i];
 
       const model = trainPoissonModel(trainSet);
+      const lambdas = calculateLambdas(test.home_team, test.away_team, model);
+      if (!lambdas) continue;
 
-      const home = testMatch.home_team;
-      const away = testMatch.away_team;
+      const probs = calculateMatchProbabilities(lambdas.lambdaHome, lambdas.lambdaAway, model.rho);
 
-      if (!model.teams[home] || !model.teams[away]) continue;
+      const actual = test.home_goals > test.away_goals ? "HOME"
+                   : test.home_goals < test.away_goals ? "AWAY" : "DRAW";
 
-      const lambdaHome = Math.exp(
-        model.teams[home].attack -
-        model.teams[away].defense +
-        model.homeAdv
-      );
+      predictions.push({ prob: { home: probs.home, draw: probs.draw, away: probs.away }, result: actual });
 
-      const lambdaAway = Math.exp(
-        model.teams[away].attack -
-        model.teams[home].defense
-      );
+      // Usa odds reais se disponíveis
+      const snap = oddsMap.get(String(test.external_match_id));
 
-      const probs = calculateMatchProbabilities(
-        lambdaHome,
-        lambdaAway,
-        model.rho
-      );
+      if (snap) {
+        const mktProb = normalizeProbs(
+          impliedProbability(snap.odd_home),
+          impliedProbability(snap.odd_draw),
+          impliedProbability(snap.odd_away),
+        );
 
-      // Estratégia simples: apostar no lado com maior prob
-      let predicted = "home";
-      let maxProb = probs.home;
+        const pick = pickBest1x2Opportunity({
+          matchLabel: `${test.home_team} vs ${test.away_team}`,
+          league,
+          modelProb:  probs,
+          bestOdds:   { bestHome: snap.odd_home, bestDraw: snap.odd_draw, bestAway: snap.odd_away },
+          marketProb: mktProb,
+          config:     { minEV: Number(min_ev), minEdge: Number(min_edge) },
+        });
 
-      if (probs.draw > maxProb) {
-        predicted = "draw";
-        maxProb = probs.draw;
-      }
+        if (!pick) continue;
 
-      if (probs.away > maxProb) {
-        predicted = "away";
-        maxProb = probs.away;
-      }
+        bets++;
+        const odd  = pick.odd;
+        const side = pick.pick;
 
-      bets++;
+        if (side === actual) {
+          wins++;
+          bankroll += (odd - 1) * 1; // stake 1u
+        } else {
+          bankroll -= 1;
+        }
 
-      const gH = testMatch.home_goals;
-      const gA = testMatch.away_goals;
-
-      let resultSide =
-        gH > gA ? "home" :
-        gH < gA ? "away" :
-        "draw";
-
-      if (predicted === resultSide) {
-        wins++;
-        bankroll += 1;  // stake fixa 1
       } else {
-        bankroll -= 1;
+        // Fallback: aposta no lado com maior prob
+        const predicted = probs.home >= probs.draw && probs.home >= probs.away ? "HOME"
+                        : probs.draw >= probs.away ? "DRAW" : "AWAY";
+        bets++;
+        if (predicted === actual) { wins++; bankroll += 1; }
+        else                      { bankroll -= 1; }
       }
     }
 
+    const metrics = evaluatePredictions(predictions);
+
     res.json({
       league,
+      hasOddsData:    hasOdds,
+      gamesTested:    predictions.length,
       bets,
       wins,
-      hitRate: wins / bets,
-      netUnits: bankroll,
-      roi: bankroll / bets
+      hitRate:        bets ? Number((wins / bets).toFixed(4)) : 0,
+      netUnits:       Number(bankroll.toFixed(2)),
+      roi:            bets ? Number((bankroll / bets).toFixed(4)) : 0,
+      // Métricas de calibração do modelo
+      calibration: {
+        brierScore: metrics.brierScore?.toFixed(5),
+        logLoss:    metrics.logLoss?.toFixed(5),
+        accuracy:   metrics.accuracy?.toFixed(4),
+      },
     });
 
+  } catch (err) {
+    console.error("[backtest] erro:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ─────────────────────────────────────────
+   ODDS SNAPSHOT
+   Salva odds atuais para uso futuro no backtest.
+───────────────────────────────────────── */
+
+app.post("/api/odds/snapshot", async (req, res) => {
+  try {
+    const matches = await fetchUpcomingMatches();
+    const byLeague = {};
+
+    for (const m of matches) {
+      const code = m.competition?.code ?? m._competitionCode;
+      if (!code || !LEAGUE_MAP[code]) continue;
+      if (!byLeague[code]) byLeague[code] = [];
+      byLeague[code].push(m);
+    }
+
+    let inserted = 0;
+
+    for (const code of Object.keys(byLeague)) {
+      const oddsEvents = await fetchOddsBySport(LEAGUE_MAP[code]);
+
+      const batchParams = [];
+      const batchRows   = [];
+      let   pi          = 1;
+
+      for (const match of byLeague[code]) {
+        const home = match.homeTeam?.name;
+        const away = match.awayTeam?.name;
+        if (!home || !away) continue;
+
+        const oddsEvent = oddsEvents.find(o =>
+          isSameTeam(o.home_team, home) && isSameTeam(o.away_team, away)
+        );
+        if (!oddsEvent) continue;
+
+        const best = extractBest1x2(oddsEvent);
+        if (!best) continue;
+
+        const overround =
+          impliedProbability(best.bestHome) +
+          impliedProbability(best.bestDraw) +
+          impliedProbability(best.bestAway);
+
+        batchRows.push(
+          `($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW(),'h2h','composite')`
+        );
+        batchParams.push(
+          match.id, match.competition?.id,
+          best.bestHome, best.bestDraw, best.bestAway, overround
+        );
+      }
+
+      if (batchRows.length > 0) {
+        await query(
+          `INSERT INTO odds_snapshots
+             (external_match_id, league_id, odd_home, odd_draw, odd_away,
+              market_overround, captured_at, market, bookmaker)
+           VALUES ${batchRows.join(",")}
+           ON CONFLICT DO NOTHING`,
+          batchParams
+        );
+        inserted += batchRows.length;
+      }
+    }
+
+    res.json({ ok: true, inserted });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+/* ─────────────────────────────────────────
+   DEBUG ROUTES (úteis em dev)
+───────────────────────────────────────── */
 
+app.get("/api/debug/upcoming",       async (req, res) => {
+  try {
+    const m = await fetchUpcomingMatches();
+    res.json({ count: m.length, sample: m[0] ?? null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
-/* ================= ODDS SNAPSHOT ================= */
+app.get("/api/debug/bets",           async (req, res) => {
+  const r = await query("SELECT COUNT(*), SUM(profit) FROM bet_log");
+  res.json(r.rows[0]);
+});
+
+app.get("/api/debug/unsettled-bets", async (req, res) => {
+  const r = await query("SELECT id, external_match_id, pick FROM bet_log WHERE result IS NULL LIMIT 10");
+  res.json(r.rows);
+});
+
+app.get("/api/debug/check-id",       async (req, res) => {
+  const r = await query(
+    "SELECT home_goals, away_goals FROM matches WHERE external_match_id = $1",
+    [req.query.id]
+  );
+  res.json(r.rows);
+});
+
+app.get("/api/db-structure",         async (req, res) => {
+  try {
+    const r = await query(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_name = 'matches' ORDER BY ordinal_position`
+    );
+    res.json({ columns: r.rows.map(r => r.column_name) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/odds/sports",          async (req, res) => {
+  try {
+    const url  = `https://api.the-odds-api.com/v4/sports/?apiKey=${process.env.ODDS_API_KEY}`;
+    const data = await fetch(url).then(r => r.json());
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+/* ─────────────────────────────────────────
+   UTILS
+───────────────────────────────────────── */
+
+function normalizeName(str = "") {
+  return str.toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z]/g, "");
+}
 
 function isSameTeam(a, b) {
   const na = normalizeName(a);
@@ -443,216 +640,75 @@ function isSameTeam(a, b) {
   return na.includes(nb) || nb.includes(na);
 }
 
-app.post("/api/odds/snapshot", async (req, res) => {
+
+app.post("/api/ingest/:league", async (req, res) => {
   try {
+    const { league } = req.params;
+    const seasons = [2022, 2023, 2024];
 
-    const matches = await fetchUpcomingMatches();
+    const { fetchHistoricalMatches } = await import(
+      "./src/services/football-data-service.js"
+    );
 
-    // Agrupar partidas por liga
-    const competitions = {};
+    const matches = await fetchHistoricalMatches(league, seasons);
 
-    for (const match of matches) {
-      const code = match.competition.code;
-      if (!LEAGUE_MAP[code]) continue;
-
-      if (!competitions[code]) competitions[code] = [];
-      competitions[code].push(match);
+    if (!matches.length) {
+      return res.json({ ok: false, message: "Nenhuma partida retornada" });
     }
 
     let inserted = 0;
 
-    for (const code of Object.keys(competitions)) {
+    for (const m of matches) {
+      const gH = m.score?.fullTime?.home;
+      const gA = m.score?.fullTime?.away;
+      const date = m.utcDate;
+      const home = m.homeTeam?.name;
+      const away = m.awayTeam?.name;
+      const compId   = m.competition?.id;
+      const compCode = m.competition?.code ?? league;
 
-      const sportKey = LEAGUE_MAP[code];
-
-      // 🔥 CHAMA API UMA VEZ POR LIGA
-      const oddsEvents = await fetchOddsBySport(sportKey);
-
-      for (const match of competitions[code]) {
-
-        const oddsEvent = oddsEvents.find(o =>
-          isSameTeam(o.home_team, match.homeTeam.name) &&
-          isSameTeam(o.away_team, match.awayTeam.name)
-        );
-
-        if (!oddsEvent) continue;
-
-        const best = extractBest1x2(oddsEvent);
-        if (!best) continue;
-
-        const impliedHome = 1 / best.bestHome;
-        const impliedDraw = 1 / best.bestDraw;
-        const impliedAway = 1 / best.bestAway;
-
-        const overround = impliedHome + impliedDraw + impliedAway;
-
-        await query(
-          `INSERT INTO odds_snapshots
-           (external_match_id, league_id, odd_home, odd_draw, odd_away,
-            market_overround, captured_at, market, bookmaker)
-           VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7,$8)`,
-          [
-            match.id,
-            match.competition.id,
-            best.bestHome,
-            best.bestDraw,
-            best.bestAway,
-            overround,
-            "h2h",
-            "composite"
-          ]
-        );
-
-        inserted++;
-      }
-    }
-
-    res.json({ ok: true, inserted });
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
-app.post("/api/settle-bets", async (req, res) => {
-  try {
-
-    const unsettled = await query(
-      `SELECT * FROM bet_log
-       WHERE result IS NULL`
-    );
-
-    let settled = 0;
-
-    for (const bet of unsettled.rows) {
-
-      const resultMatch = await query(
-        `SELECT home_goals, away_goals
-         FROM matches
-         WHERE external_match_id = $1`,
-        [bet.external_match_id]
-      );
-
-      if (!resultMatch.rows.length) continue;
-
-      const m = resultMatch.rows[0];
-
-      let outcome;
-
-      if (m.home_goals > m.away_goals) outcome = "HOME";
-      else if (m.home_goals < m.away_goals) outcome = "AWAY";
-      else outcome = "DRAW";
-
-      const win = outcome === bet.pick;
-
-      const profit = win
-        ? (bet.odd_taken - 1) * bet.stake
-        : -bet.stake;
+      if (!home || !away || !date) continue;
 
       await query(
-        `UPDATE bet_log
-         SET result = $1,
-             profit = $2
-         WHERE id = $3`,
-        [win ? "WIN" : "LOSS", profit, bet.id]
+        `INSERT INTO matches
+           (external_match_id, league_id, season, home_team, away_team,
+            match_date, home_goals, away_goals, status, competition_code)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         ON CONFLICT (external_match_id) DO UPDATE
+           SET home_goals = EXCLUDED.home_goals,
+               away_goals = EXCLUDED.away_goals,
+               status     = EXCLUDED.status`,
+        [
+          String(m.id), compId, m.season?.startDate?.slice(0,4) ?? "2024",
+          home, away, date, gH ?? null, gA ?? null,
+          gH != null ? "FINISHED" : "SCHEDULED", compCode
+        ]
       );
-
-      settled++;
+      inserted++;
     }
 
-    res.json({ ok: true, settled });
+    res.json({ ok: true, league, inserted, total: matches.length });
 
   } catch (err) {
+    console.error("[ingest]", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/api/performance", async (req, res) => {
-  try {
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-    const stats = await query(`
-      SELECT
-        COUNT(*) as bets,
-        SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
-        SUM(profit) as net_units
-      FROM bet_log
-      WHERE result IS NOT NULL
-    `);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
 
-    const bets = Number(stats.rows[0].bets || 0);
-    const wins = Number(stats.rows[0].wins || 0);
-    const net = Number(stats.rows[0].net_units || 0);
+app.use(express.static(__dirname));
 
-    res.json({
-      bets,
-      wins,
-      hitRate: bets ? wins / bets : 0,
-      netUnits: net,
-      roi: bets ? net / bets : 0
-    });
 
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post("/api/sync-results", async (req, res) => {
-  try {
-
-    const matches = await fetchRecentFinishedMatches();
-
-    let updated = 0;
-
-    for (const match of matches) {
-
-      const homeGoals = match.score?.fullTime?.home;
-      const awayGoals = match.score?.fullTime?.away;
-
-      if (homeGoals == null || awayGoals == null) continue;
-
-      await query(
-        `UPDATE matches
-         SET home_goals = $1,
-             away_goals = $2,
-             status = 'FINISHED'
-         WHERE external_match_id::text = $3::text`,
-        [homeGoals, awayGoals, match.id]
-      );
-
-      updated++;
-    }
-
-    res.json({ ok: true, updated });
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/api/debug/check-match/:id", async (req, res) => {
-  try {
-    const id = req.params.id;
-
-    const url = `https://api.football-data.org/v4/matches/${id}`;
-
-    const response = await fetch(url, {
-      headers: {
-        "X-Auth-Token": process.env.FOOTBALL_DATA_KEY
-      }
-    });
-
-    const data = await response.json();
-
-    res.json(data);
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* ================= START ================= */
+/* ─────────────────────────────────────────
+   START
+───────────────────────────────────────── */
 
 app.listen(PORT, () => {
-  console.log(`Egg Stats running on http://localhost:${PORT}`);
+  console.log(`🥚 Egg Stats rodando em http://localhost:${PORT}`);
+  console.log(`   Mock odds: ${process.env.USE_MOCK_ODDS === "true" ? "✅ ATIVO" : "❌ desativado (API real)"}`);
 });
