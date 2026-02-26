@@ -1,0 +1,1189 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Egg Stats — Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&family=Bebas+Neue&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:       #080a0c;
+    --bg2:      #0d1117;
+    --surface:  #111820;
+    --surface2: #1a2535;
+    --border:   #1e2e40;
+    --border2:  #243547;
+    --green:    #00ff88;
+    --green-dim:#00c868;
+    --green-glow: rgba(0,255,136,0.12);
+    --red:      #ff4560;
+    --yellow:   #f5c542;
+    --blue:     #3a8fff;
+    --text:     #e2eaf4;
+    --text2:    #7a9bb5;
+    --text3:    #3d5a72;
+    --mono:     'Space Mono', monospace;
+    --sans:     'DM Sans', sans-serif;
+    --display:  'Bebas Neue', cursive;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content:'';
+    position:fixed; inset:0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.025) 2px, rgba(0,0,0,0.025) 4px);
+    pointer-events:none; z-index:9999;
+  }
+
+  /* ── NAV ── */
+  nav {
+    position: sticky; top:0; z-index:100;
+    display:flex; align-items:center; justify-content:space-between;
+    padding: 0 32px; height:56px;
+    background: rgba(8,10,12,0.92);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .nav-logo {
+    display:flex; align-items:center; gap:10px;
+    font-family:var(--mono); font-size:13px; font-weight:700;
+    color:var(--text); text-decoration:none; letter-spacing:0.06em;
+  }
+
+  .egg {
+    width:24px; height:24px;
+    background:var(--green);
+    border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
+    box-shadow: 0 0 12px var(--green);
+    flex-shrink:0;
+  }
+
+  .nav-status {
+    display:flex; align-items:center; gap:6px;
+    font-family:var(--mono); font-size:11px; color:var(--text3);
+  }
+
+  .status-dot {
+    width:7px; height:7px; border-radius:50%;
+    background: var(--text3);
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+  .status-dot.online  { background:var(--green); box-shadow:0 0 8px var(--green); animation: pulse 2s infinite; }
+  .status-dot.error   { background:var(--red); }
+  .status-dot.loading { background:var(--yellow); animation: pulse 1s infinite; }
+
+  @keyframes pulse {
+    0%,100%{ opacity:1; transform:scale(1); }
+    50%    { opacity:0.5; transform:scale(0.8); }
+  }
+
+  .nav-time {
+    font-family:var(--mono); font-size:11px; color:var(--text3);
+  }
+
+  /* ── LAYOUT ── */
+  .layout {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    min-height: calc(100vh - 56px);
+  }
+
+  /* ── SIDEBAR ── */
+  .sidebar {
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    padding: 24px 0;
+    position: sticky;
+    top: 56px;
+    height: calc(100vh - 56px);
+    overflow-y: auto;
+  }
+
+  .sidebar-section { padding: 0 12px; margin-bottom: 24px; }
+
+  .sidebar-label {
+    font-family:var(--mono); font-size:10px; letter-spacing:0.12em;
+    color:var(--text3); text-transform:uppercase;
+    padding: 0 8px; margin-bottom:8px;
+  }
+
+  .nav-item {
+    display:flex; align-items:center; gap:10px;
+    padding: 8px 12px; border-radius:6px;
+    font-size:13px; color:var(--text2);
+    cursor:pointer; transition: all 0.15s;
+    margin-bottom:2px; border:none;
+    background:transparent; width:100%; text-align:left;
+  }
+
+  .nav-item:hover { background:var(--surface); color:var(--text); }
+  .nav-item.active { background:var(--surface); color:var(--green); }
+
+  .nav-dot {
+    width:6px; height:6px; border-radius:50%;
+    background:var(--border2); flex-shrink:0;
+    transition: background 0.2s, box-shadow 0.2s;
+  }
+  .nav-item.active .nav-dot {
+    background:var(--green);
+    box-shadow: 0 0 6px var(--green);
+  }
+
+  .sidebar-stats {
+    margin: 16px 12px 0;
+    padding: 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
+  .sidebar-stat-label {
+    font-family:var(--mono); font-size:10px;
+    color:var(--text3); letter-spacing:0.08em;
+    text-transform:uppercase; margin-bottom:4px;
+  }
+
+  .sidebar-stat-val {
+    font-family:var(--mono); font-size:18px;
+    font-weight:700; color:var(--green);
+    text-shadow: 0 0 12px rgba(0,255,136,0.3);
+  }
+
+  /* ── MAIN ── */
+  .main { padding: 28px 32px; overflow-x: hidden; }
+
+  /* ── PAGES ── */
+  .page { display:none; }
+  .page.active { display:block; animation: fadeIn 0.3s ease; }
+
+  @keyframes fadeIn {
+    from { opacity:0; transform:translateY(8px); }
+    to   { opacity:1; transform:translateY(0); }
+  }
+
+  /* ── PAGE HEADER ── */
+  .page-header {
+    display:flex; align-items:flex-end; justify-content:space-between;
+    margin-bottom:24px; padding-bottom:20px;
+    border-bottom:1px solid var(--border);
+  }
+
+  .page-label {
+    font-family:var(--mono); font-size:10px; letter-spacing:0.15em;
+    color:var(--green); text-transform:uppercase; margin-bottom:6px;
+  }
+
+  .page-title {
+    font-family:var(--display); font-size:36px;
+    line-height:1; letter-spacing:0.02em; color:var(--text);
+  }
+
+  .page-actions { display:flex; gap:8px; }
+
+  .btn {
+    padding: 8px 16px; border-radius:4px;
+    font-family:var(--sans); font-size:12px; font-weight:600;
+    cursor:pointer; transition:all 0.15s; letter-spacing:0.04em;
+    border:1px solid var(--border2); background:transparent;
+    color:var(--text2);
+  }
+  .btn:hover { border-color:var(--text3); color:var(--text); }
+  .btn:disabled { opacity:0.4; cursor:not-allowed; }
+
+  .btn-green {
+    border-color:var(--green); background:var(--green-glow);
+    color:var(--green);
+  }
+  .btn-green:hover { background:var(--green); color:#080a0c; }
+
+  /* ── KPI GRID ── */
+  .kpi-grid {
+    display:grid; grid-template-columns:repeat(4,1fr);
+    gap:12px; margin-bottom:24px;
+  }
+
+  .kpi {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:8px; padding:16px; position:relative; overflow:hidden;
+    transition: border-color 0.2s;
+  }
+  .kpi:hover { border-color:var(--border2); }
+
+  .kpi.accent::after {
+    content:''; position:absolute; top:0; left:0; right:0; height:2px;
+    background:var(--green); box-shadow:0 0 8px var(--green);
+  }
+
+  .kpi-label {
+    font-family:var(--mono); font-size:10px; letter-spacing:0.1em;
+    color:var(--text3); text-transform:uppercase; margin-bottom:8px;
+  }
+
+  .kpi-val {
+    font-family:var(--mono); font-size:24px; font-weight:700;
+    line-height:1; margin-bottom:4px;
+  }
+
+  .kpi-val.green  { color:var(--green); text-shadow:0 0 12px rgba(0,255,136,0.25); }
+  .kpi-val.white  { color:var(--text); }
+  .kpi-val.yellow { color:var(--yellow); }
+  .kpi-val.red    { color:var(--red); }
+
+  .kpi-sub {
+    font-family:var(--mono); font-size:11px; color:var(--text3);
+  }
+
+  /* ── TABLE ── */
+  .table-wrap {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:8px; overflow:hidden;
+  }
+
+  .table-head {
+    display:grid; padding:10px 16px;
+    border-bottom:1px solid var(--border);
+    background:var(--bg2);
+  }
+
+  .th {
+    font-family:var(--mono); font-size:10px; letter-spacing:0.1em;
+    color:var(--text3); text-transform:uppercase;
+    cursor:pointer; user-select:none;
+    transition:color 0.15s;
+  }
+  .th:hover { color:var(--text2); }
+  .th.sort-asc::after  { content:' ↑'; color:var(--green); }
+  .th.sort-desc::after { content:' ↓'; color:var(--green); }
+
+.table-row {
+  display: grid !important;
+  grid-template-columns: 2fr 1fr 1fr 1fr 1fr 80px;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+  .table-row:last-child { border-bottom:none; }
+  .table-row:hover { background:rgba(255,255,255,0.02); }
+
+  .match-name  { font-size:13px; color:var(--text); font-weight:500; }
+  .match-sub   { font-family:var(--mono); font-size:10px; color:var(--text3); margin-top:2px; }
+
+  .cell-mono { font-family:var(--mono); font-size:13px; color:var(--text2); }
+
+  .badge {
+    display:inline-block; padding:3px 8px; border-radius:4px;
+    font-family:var(--mono); font-size:11px; font-weight:700;
+  }
+  .badge-green { color:var(--green); background:rgba(0,255,136,0.08); border:1px solid rgba(0,255,136,0.2); }
+  .badge-yellow{ color:var(--yellow); background:rgba(245,197,66,0.08); border:1px solid rgba(245,197,66,0.2); }
+  .badge-red   { color:var(--red); background:rgba(255,69,96,0.08); border:1px solid rgba(255,69,96,0.2); }
+  .badge-gray  { color:var(--text3); background:var(--border); border:1px solid var(--border2); }
+
+  /* ── PROGRESS BAR ── */
+  .bar-wrap { height:4px; background:var(--border); border-radius:2px; overflow:hidden; margin-top:4px; }
+  .bar-fill { height:100%; border-radius:2px; transition:width 1s ease; }
+  .bar-fill.green  { background:var(--green); box-shadow:0 0 6px var(--green); }
+  .bar-fill.yellow { background:var(--yellow); }
+  .bar-fill.red    { background:var(--red); }
+
+  /* ── LOADING STATES ── */
+  .skeleton {
+    background: linear-gradient(90deg, var(--surface) 25%, var(--surface2) 50%, var(--surface) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius:4px; height:20px;
+  }
+  @keyframes shimmer {
+    from { background-position:200% 0; }
+    to   { background-position:-200% 0; }
+  }
+
+  .loading-rows { padding:16px; display:flex; flex-direction:column; gap:12px; }
+  .skeleton-row { display:flex; gap:12px; }
+  .skeleton-row .skeleton:first-child { flex:2; }
+  .skeleton-row .skeleton { flex:1; }
+
+  /* ── EMPTY / ERROR ── */
+  .empty-state {
+    padding: 60px 24px; text-align:center;
+  }
+  .empty-icon { font-size:40px; margin-bottom:12px; }
+  .empty-title { font-family:var(--mono); font-size:13px; color:var(--text2); margin-bottom:6px; }
+  .empty-sub { font-size:12px; color:var(--text3); }
+
+  /* ── SYSTEM STATUS ── */
+  .status-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:24px; }
+
+  .status-card {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:8px; padding:20px;
+    display:flex; align-items:center; gap:16px;
+  }
+
+  .status-icon {
+    width:40px; height:40px; border-radius:8px;
+    display:flex; align-items:center; justify-content:center;
+    font-size:18px; flex-shrink:0;
+    background: var(--bg2); border:1px solid var(--border);
+  }
+
+  .status-info { flex:1; min-width:0; }
+  .status-name { font-family:var(--mono); font-size:12px; color:var(--text); font-weight:700; margin-bottom:4px; }
+  .status-detail { font-size:12px; color:var(--text3); }
+
+  .status-badge {
+    font-family:var(--mono); font-size:10px; font-weight:700;
+    padding:3px 8px; border-radius:100px; letter-spacing:0.08em;
+  }
+  .status-badge.ok      { background:rgba(0,255,136,0.1); color:var(--green); border:1px solid rgba(0,255,136,0.2); }
+  .status-badge.error   { background:rgba(255,69,96,0.1); color:var(--red); border:1px solid rgba(255,69,96,0.2); }
+  .status-badge.loading { background:rgba(245,197,66,0.1); color:var(--yellow); border:1px solid rgba(245,197,66,0.2); }
+
+  /* ── BACKTEST ── */
+  .backtest-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:24px; }
+
+  .backtest-card {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:8px; padding:24px;
+  }
+
+  .backtest-card-title {
+    font-family:var(--mono); font-size:11px; color:var(--text3);
+    letter-spacing:0.1em; text-transform:uppercase; margin-bottom:16px;
+  }
+
+  .big-number {
+    font-family:var(--display); font-size:56px; line-height:1;
+    letter-spacing:0.02em;
+  }
+  .big-number.green  { color:var(--green); text-shadow:0 0 30px rgba(0,255,136,0.3); }
+  .big-number.yellow { color:var(--yellow); }
+  .big-number.white  { color:var(--text); }
+
+  .metric-list { display:flex; flex-direction:column; gap:10px; margin-top:16px; }
+  .metric-row2 {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:8px 0; border-bottom:1px solid var(--border);
+  }
+  .metric-row2:last-child { border-bottom:none; }
+  .metric-name { font-size:13px; color:var(--text2); }
+  .metric-val2 { font-family:var(--mono); font-size:13px; font-weight:700; }
+  .metric-val2.green { color:var(--green); }
+  .metric-val2.white { color:var(--text); }
+  .metric-val2.yellow{ color:var(--yellow); }
+
+  /* ── LEAGUE SELECTOR ── */
+  .league-tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:20px; }
+  .league-tab {
+    padding:5px 12px; border-radius:4px;
+    font-family:var(--mono); font-size:11px; cursor:pointer;
+    border:1px solid var(--border); background:transparent;
+    color:var(--text3); transition:all 0.15s; letter-spacing:0.06em;
+  }
+  .league-tab:hover { color:var(--text2); border-color:var(--border2); }
+  .league-tab.active { border-color:var(--green); color:var(--green); background:var(--green-glow); }
+
+  /* ── PROB BARS ── */
+  .prob-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-top:12px; }
+  .prob-item { text-align:center; }
+  .prob-label { font-family:var(--mono); font-size:10px; color:var(--text3); margin-bottom:4px; }
+  .prob-val   { font-family:var(--mono); font-size:14px; font-weight:700; color:var(--text); }
+
+  /* ── MODAL (detalhe da aposta) ── */
+  .modal-overlay {
+    position:fixed; inset:0; background:rgba(0,0,0,0.7);
+    backdrop-filter:blur(4px); z-index:200;
+    display:none; align-items:center; justify-content:center;
+  }
+  .modal-overlay.open { display:flex; animation:fadeIn 0.2s ease; }
+
+  .modal {
+    background:var(--bg2); border:1px solid var(--border2);
+    border-radius:12px; padding:28px; width:480px; max-width:90vw;
+    position:relative;
+  }
+
+  .modal-close {
+    position:absolute; top:16px; right:16px;
+    background:none; border:none; color:var(--text3);
+    font-size:18px; cursor:pointer; transition:color 0.15s;
+    line-height:1;
+  }
+  .modal-close:hover { color:var(--text); }
+
+  .modal-title {
+    font-family:var(--display); font-size:28px; letter-spacing:0.02em;
+    color:var(--text); margin-bottom:4px;
+  }
+  .modal-subtitle { font-family:var(--mono); font-size:11px; color:var(--text3); margin-bottom:20px; }
+
+  .modal-ev {
+    display:flex; gap:12px; margin-bottom:20px;
+  }
+  .modal-kpi {
+    flex:1; background:var(--surface); border:1px solid var(--border);
+    border-radius:6px; padding:12px; text-align:center;
+  }
+  .modal-kpi-label { font-family:var(--mono); font-size:10px; color:var(--text3); margin-bottom:6px; }
+  .modal-kpi-val { font-family:var(--mono); font-size:20px; font-weight:700; }
+
+  .prob-compare { display:flex; flex-direction:column; gap:8px; }
+  .prob-compare-row { display:flex; align-items:center; gap:12px; }
+  .prob-compare-label { font-family:var(--mono); font-size:11px; color:var(--text3); width:80px; flex-shrink:0; }
+  .prob-compare-bars { flex:1; display:flex; flex-direction:column; gap:4px; }
+  .prob-bar-row { display:flex; align-items:center; gap:8px; }
+  .prob-bar-label { font-family:var(--mono); font-size:10px; color:var(--text3); width:48px; text-align:right; }
+  .prob-bar-track { flex:1; height:6px; background:var(--border); border-radius:3px; overflow:hidden; }
+  .prob-bar-fill  { height:100%; border-radius:3px; transition:width 0.8s ease; }
+  .prob-bar-pct   { font-family:var(--mono); font-size:10px; color:var(--text2); width:36px; }
+
+  /* ── RESPONSIVE ── */
+  @media (max-width: 768px) {
+    .layout { grid-template-columns:1fr; }
+    .sidebar { display:none; }
+    .kpi-grid { grid-template-columns:repeat(2,1fr); }
+    .status-grid, .backtest-grid { grid-template-columns:1fr; }
+    .main { padding:16px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a class="nav-logo" href="#">
+    <div class="egg"></div>
+    EGG&nbsp;<span style="color:var(--green)">STATS</span>
+    <span style="color:var(--text3); font-weight:400; font-size:11px; margin-left:4px;">v1.0</span>
+  </a>
+  <div style="display:flex;align-items:center;gap:20px;">
+    <div class="nav-status">
+      <div class="status-dot loading" id="navDot"></div>
+      <span id="navStatusText">conectando...</span>
+    </div>
+    <div class="nav-time" id="navTime"></div>
+  </div>
+</nav>
+
+<div class="layout">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Navegação</div>
+      <button class="nav-item active" onclick="showPage('opportunities', this)">
+        <div class="nav-dot"></div>Oportunidades
+      </button>
+      <button class="nav-item" onclick="showPage('backtest', this)">
+        <div class="nav-dot"></div>Backtest
+      </button>
+      <button class="nav-item" onclick="showPage('performance', this)">
+        <div class="nav-dot"></div>Performance
+      </button>
+      <button class="nav-item" onclick="showPage('system', this)">
+        <div class="nav-dot"></div>Sistema
+      </button>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Ligas ativas</div>
+      <button class="nav-item" id="sb-PL" onclick="filterLeague('PL')"><div class="nav-dot"></div>Premier League</button>
+      <button class="nav-item" id="sb-SA" onclick="filterLeague('SA')"><div class="nav-dot"></div>Serie A</button>
+      <button class="nav-item" id="sb-PD" onclick="filterLeague('PD')"><div class="nav-dot"></div>La Liga</button>
+      <button class="nav-item" id="sb-BL1" onclick="filterLeague('BL1')"><div class="nav-dot"></div>Bundesliga</button>
+      <button class="nav-item" id="sb-FL1" onclick="filterLeague('FL1')"><div class="nav-dot"></div>Ligue 1</button>
+    </div>
+
+    <div class="sidebar-stats">
+      <div class="sidebar-stat-label">Banco de dados</div>
+      <div class="sidebar-stat-val" id="sbTotalMatches">—</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:2px;">partidas históricas</div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+
+    <!-- ── PAGE: OPPORTUNITIES ── -->
+    <div class="page active" id="page-opportunities">
+      <div class="page-header">
+        <div>
+          <div class="page-label">// MODELO POISSON + EV</div>
+          <div class="page-title">OPORTUNIDADES</div>
+        </div>
+        <div class="page-actions">
+          <button class="btn btn-green" onclick="loadOpportunities()" id="btnRefresh">
+            ↻ Atualizar
+          </button>
+        </div>
+      </div>
+
+      <!-- KPIs -->
+      <div class="kpi-grid" id="oppKpis">
+        <div class="kpi"><div class="skeleton"></div></div>
+        <div class="kpi"><div class="skeleton" style="height:16px;margin-top:8px"></div></div>
+        <div class="kpi"><div class="skeleton" style="height:16px;margin-top:8px"></div></div>
+        <div class="kpi"><div class="skeleton" style="height:16px;margin-top:8px"></div></div>
+      </div>
+
+      <!-- Filter tabs -->
+      <div class="league-tabs" id="leagueTabs">
+        <button class="league-tab active" onclick="filterConfidence('all', this)">Todos</button>
+        <button class="league-tab" onclick="filterConfidence('HIGH', this)">HIGH</button>
+        <button class="league-tab" onclick="filterConfidence('MEDIUM', this)">MEDIUM</button>
+        <button class="league-tab" onclick="filterConfidence('LOW', this)">LOW</button>
+      </div>
+
+      <!-- Table -->
+      <div class="table-wrap">
+        <div class="table-head" style="grid-template-columns:2fr 1fr 1fr 1fr 1fr 80px;">
+          <div class="th" onclick="sortTable('match')">PARTIDA</div>
+          <div class="th" onclick="sortTable('modelProb')">P(MODELO)</div>
+          <div class="th" onclick="sortTable('odd')">ODD</div>
+          <div class="th" onclick="sortTable('edge')">EDGE</div>
+          <div class="th" onclick="sortTable('ev')">EV %</div>
+          <div class="th">CONF.</div>
+        </div>
+        <div id="oppTableBody">
+          <div class="loading-rows">
+            <div class="skeleton-row"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
+            <div class="skeleton-row"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
+            <div class="skeleton-row"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── PAGE: BACKTEST ── -->
+    <div class="page" id="page-backtest">
+      <div class="page-header">
+        <div>
+          <div class="page-label">// SIMULAÇÃO HISTÓRICA</div>
+          <div class="page-title">BACKTEST</div>
+        </div>
+        <div class="page-actions">
+          <button class="btn btn-green" onclick="loadBacktest()" id="btnBacktest">▶ Rodar</button>
+        </div>
+      </div>
+
+      <div class="league-tabs">
+        <button class="league-tab active" data-league="PL" onclick="selectBacktestLeague('PL',this)">PL</button>
+        <button class="league-tab" data-league="SA"  onclick="selectBacktestLeague('SA',this)">SA</button>
+        <button class="league-tab" data-league="PD"  onclick="selectBacktestLeague('PD',this)">PD</button>
+        <button class="league-tab" data-league="BL1" onclick="selectBacktestLeague('BL1',this)">BL1</button>
+        <button class="league-tab" data-league="FL1" onclick="selectBacktestLeague('FL1',this)">FL1</button>
+      </div>
+
+      <div class="backtest-grid" id="backtestGrid">
+        <div class="backtest-card">
+          <div class="backtest-card-title">ROI BACKTESTED</div>
+          <div class="big-number green" id="btROI">—</div>
+          <div style="font-size:12px;color:var(--text3);margin-top:6px;" id="btROISub">aguardando...</div>
+        </div>
+        <div class="backtest-card">
+          <div class="backtest-card-title">HIT RATE</div>
+          <div class="big-number white" id="btHitRate">—</div>
+          <div style="font-size:12px;color:var(--text3);margin-top:6px;" id="btHitSub">aguardando...</div>
+        </div>
+      </div>
+
+      <div class="backtest-card" id="btDetails" style="display:none;">
+        <div class="backtest-card-title">MÉTRICAS COMPLETAS</div>
+        <div class="metric-list" id="btMetricList"></div>
+      </div>
+    </div>
+
+    <!-- ── PAGE: PERFORMANCE ── -->
+    <div class="page" id="page-performance">
+      <div class="page-header">
+        <div>
+          <div class="page-label">// APOSTAS REAIS</div>
+          <div class="page-title">PERFORMANCE</div>
+        </div>
+        <div class="page-actions">
+          <button class="btn" onclick="settleBets()" id="btnSettle">⚡ Liquidar apostas</button>
+          <button class="btn btn-green" onclick="loadPerformance()">↻ Atualizar</button>
+        </div>
+      </div>
+
+      <div class="kpi-grid" id="perfKpis">
+        <div class="kpi"><div class="skeleton"></div></div>
+        <div class="kpi"><div class="skeleton" style="height:16px;margin-top:8px"></div></div>
+        <div class="kpi"><div class="skeleton" style="height:16px;margin-top:8px"></div></div>
+        <div class="kpi"><div class="skeleton" style="height:16px;margin-top:8px"></div></div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;" id="perfBreakdown">
+        <div class="table-wrap">
+          <div class="table-head" style="grid-template-columns:1fr 1fr 1fr 1fr;">
+            <div class="th">LIGA</div><div class="th">APOSTAS</div>
+            <div class="th">HIT%</div><div class="th">UNITS</div>
+          </div>
+          <div id="perfByLeague"><div class="loading-rows"><div class="skeleton-row"><div class="skeleton"></div><div class="skeleton"></div></div></div></div>
+        </div>
+        <div class="table-wrap">
+          <div class="table-head" style="grid-template-columns:1fr 1fr 1fr 1fr;">
+            <div class="th">CONF.</div><div class="th">APOSTAS</div>
+            <div class="th">HIT%</div><div class="th">UNITS</div>
+          </div>
+          <div id="perfByConf"><div class="loading-rows"><div class="skeleton-row"><div class="skeleton"></div><div class="skeleton"></div></div></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── PAGE: SYSTEM ── -->
+    <div class="page" id="page-system">
+      <div class="page-header">
+        <div>
+          <div class="page-label">// DIAGNÓSTICO</div>
+          <div class="page-title">SISTEMA</div>
+        </div>
+        <div class="page-actions">
+          <button class="btn btn-green" onclick="loadSystem()">↻ Verificar</button>
+        </div>
+      </div>
+
+      <div class="status-grid" id="systemCards">
+        <div class="status-card"><div class="status-icon">🔄</div><div class="status-info"><div class="status-name">Verificando...</div></div></div>
+        <div class="status-card"><div class="status-icon">🔄</div><div class="status-info"><div class="status-name">Verificando...</div></div></div>
+        <div class="status-card"><div class="status-icon">🔄</div><div class="status-info"><div class="status-name">Verificando...</div></div></div>
+        <div class="status-card"><div class="status-icon">🔄</div><div class="status-info"><div class="status-name">Verificando...</div></div></div>
+      </div>
+
+      <!-- Ingestão rápida -->
+      <div class="backtest-card" style="margin-top:0;">
+        <div class="backtest-card-title">INGESTÃO DE DADOS</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:16px;">Popular o banco com histórico de uma liga. Use quando adicionar uma nova liga.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;" id="ingestBtns">
+          <button class="btn btn-green" onclick="ingestLeague('PL')">Ingerir PL</button>
+          <button class="btn" onclick="ingestLeague('SA')">Ingerir SA</button>
+          <button class="btn" onclick="ingestLeague('PD')">Ingerir PD</button>
+          <button class="btn" onclick="ingestLeague('BL1')">Ingerir BL1</button>
+          <button class="btn" onclick="ingestLeague('FL1')">Ingerir FL1</button>
+        </div>
+        <div id="ingestResult" style="margin-top:12px;font-family:var(--mono);font-size:12px;color:var(--text3);"></div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- MODAL -->
+<div class="modal-overlay" id="modal" onclick="closeModal(event)">
+  <div class="modal" id="modalContent">
+    <button class="modal-close" onclick="document.getElementById('modal').classList.remove('open')">✕</button>
+    <div class="modal-title" id="mTitle">—</div>
+    <div class="modal-subtitle" id="mSubtitle">—</div>
+    <div class="modal-ev" id="mKpis"></div>
+    <div id="mProbBars"></div>
+  </div>
+</div>
+
+<script>
+ const API = 'http://localhost:3000';
+
+  // ── STATE ──
+  let allOpps = [];
+  let filteredOpps = [];
+  let sortKey = 'ev';
+  let sortDir = 'desc';
+  let confFilter = 'all';
+  let backtestLeague = 'PL';
+
+  // ── CLOCK ──
+  function updateClock() {
+    document.getElementById('navTime').textContent =
+      new Date().toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  }
+  setInterval(updateClock, 1000);
+  updateClock();
+
+  // ── NAV STATUS ──
+  function setNavStatus(state, text) {
+    const dot  = document.getElementById('navDot');
+    const span = document.getElementById('navStatusText');
+    dot.className = 'status-dot ' + state;
+    span.textContent = text;
+  }
+
+  // ── PAGE SWITCH ──
+  function showPage(name, btn) {
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+    document.getElementById('page-' + name).classList.add('active');
+    if (btn) btn.classList.add('active');
+
+    if (name === 'opportunities') loadOpportunities();
+    if (name === 'backtest')      loadBacktest();
+    if (name === 'performance')   loadPerformance();
+    if (name === 'system')        loadSystem();
+  }
+
+  // ── FILTER LEAGUE (sidebar) ──
+  function filterLeague(code) {
+    confFilter = 'all';
+    document.querySelectorAll('.league-tab').forEach(t => t.classList.remove('active'));
+    document.querySelector('.league-tab').classList.add('active');
+    filteredOpps = code ? allOpps.filter(o => o.league === code) : allOpps;
+    renderOppTable(filteredOpps);
+  }
+
+  // ── FILTER CONFIDENCE ──
+  function filterConfidence(level, btn) {
+    confFilter = level;
+    document.querySelectorAll('.league-tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    filteredOpps = level === 'all' ? [...allOpps] : allOpps.filter(o => o.confidence === level);
+    renderOppTable(filteredOpps);
+  }
+
+  // ── SORT ──
+  function sortTable(key) {
+    if (sortKey === key) sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+    else { sortKey = key; sortDir = 'desc'; }
+    document.querySelectorAll('.th').forEach(th => {
+      th.classList.remove('sort-asc','sort-desc');
+    });
+    event.target.classList.add('sort-' + sortDir);
+    const sorted = [...filteredOpps].sort((a,b) => {
+      let va = sortKey === 'match' ? a.match : (sortKey === 'modelProb' ? a.modelProb.home : a[sortKey]);
+      let vb = sortKey === 'match' ? b.match : (sortKey === 'modelProb' ? b.modelProb.home : b[sortKey]);
+      if (typeof va === 'string') return sortDir==='asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+      return sortDir === 'asc' ? va - vb : vb - va;
+    });
+    renderOppTable(sorted);
+  }
+
+  // ── LOAD OPPORTUNITIES ──
+  async function loadOpportunities() {
+    setNavStatus('loading', 'buscando...');
+    document.getElementById('btnRefresh').disabled = true;
+    document.getElementById('btnRefresh').textContent = '↻ Buscando...';
+
+    document.getElementById('oppTableBody').innerHTML = `
+      <div class="loading-rows">
+        ${[1,2,3,4].map(()=>`<div class="skeleton-row"><div class="skeleton" style="flex:2"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>`).join('')}
+      </div>`;
+
+    try {
+      const res  = await fetch(`${API}/api/opportunities`);
+      const data = await res.json();
+      allOpps = data.top || [];
+      filteredOpps = [...allOpps];
+
+      // KPIs
+      const high   = allOpps.filter(o => o.confidence === 'HIGH').length;
+      const avgEV  = allOpps.length ? (allOpps.reduce((s,o)=>s+o.ev,0)/allOpps.length*100).toFixed(1) : 0;
+      const maxEdge= allOpps.length ? (Math.max(...allOpps.map(o=>o.edge))*100).toFixed(1) : 0;
+
+      document.getElementById('oppKpis').innerHTML = `
+        <div class="kpi accent">
+          <div class="kpi-label">Total EV+</div>
+          <div class="kpi-val green">${data.count}</div>
+          <div class="kpi-sub">oportunidades hoje</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">HIGH confidence</div>
+          <div class="kpi-val ${high>0?'green':'white'}">${high}</div>
+          <div class="kpi-sub">edge > 6% e EV > 8%</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">EV médio</div>
+          <div class="kpi-val ${avgEV>5?'green':'yellow'}">+${avgEV}%</div>
+          <div class="kpi-sub">retorno esperado</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Maior edge</div>
+          <div class="kpi-val green">+${maxEdge}%</div>
+          <div class="kpi-sub">vantagem sobre mercado</div>
+        </div>`;
+
+      renderOppTable(filteredOpps);
+      setNavStatus('online', 'online');
+
+      // Update sidebar stats
+      //loadSidebarStats();
+
+      function loadSidebarStats() {
+  // Placeholder para futura implementação
+}
+
+    } catch(e) {
+      setNavStatus('error', 'erro de conexão');
+      document.getElementById('oppTableBody').innerHTML = `
+        <div class="empty-state">
+          <div class="empty-icon">⚠️</div>
+          <div class="empty-title">Não foi possível conectar ao servidor</div>
+          <div class="empty-sub">Verifique se o servidor está rodando em localhost:3000</div>
+        </div>`;
+    }
+
+    document.getElementById('btnRefresh').disabled = false;
+    document.getElementById('btnRefresh').textContent = '↻ Atualizar';
+  }
+
+  function renderOppTable(opps) {
+  if (!opps.length) {
+    document.getElementById('oppTableBody').innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">🔍</div>
+        <div class="empty-title">Nenhuma oportunidade encontrada</div>
+        <div class="empty-sub">Tente mudar o filtro ou atualizar</div>
+      </div>`;
+    return;
+  }
+
+  document.getElementById('oppTableBody').innerHTML = opps.map((o,i) => {
+
+    const evPct   = (o.ev * 100).toFixed(1);
+    const edgePct = (o.edge * 100).toFixed(1);
+    const confClass =
+      o.confidence === 'HIGH'   ? 'badge-green'  :
+      o.confidence === 'MEDIUM' ? 'badge-yellow' :
+                                  'badge-gray';
+
+    return `
+      <div class="table-row"
+           style="grid-template-columns:2fr 1fr 1fr 1fr 1fr 80px;"
+           onclick="showDetail(${i}); loadOddsHistory('${o.matchId}')"
+
+        <div>
+          <div class="match-name">${o.home} vs ${o.away}</div>
+          <div class="match-sub">${leagueName(o.league)} · ${o.pick}</div>
+        </div>
+
+        <div>
+          <div class="cell-mono">—</div>
+        </div>
+
+        <div class="cell-mono">${o.odd}</div>
+
+        <div class="cell-mono" style="color:var(--green)">
+          ${edgePct > 0 ? '+' : ''}${edgePct}%
+        </div>
+
+        <div>
+          <span class="badge badge-green">
+            ${evPct > 0 ? '+' : ''}${evPct}%
+          </span>
+        </div>
+
+        <div>
+          <span class="badge ${confClass}">
+            ${o.confidence}
+          </span>
+        </div>
+
+      </div>`;
+  }).join('');
+}
+
+  // ── DETAIL MODAL ──
+  function showDetail(idx) {
+    const o = filteredOpps[idx];
+    if (!o) return;
+
+    document.getElementById('mTitle').textContent = o.match;
+    document.getElementById('mSubtitle').textContent = `${leagueName(o.league)} · Apostar: ${o.pick} @ ${o.odd}`;
+
+    document.getElementById('mKpis').innerHTML = `
+      <div class="modal-kpi">
+        <div class="modal-kpi-label">EV</div>
+        <div class="modal-kpi-val" style="color:var(--green)">+${(o.ev*100).toFixed(1)}%</div>
+      </div>
+      <div class="modal-kpi">
+        <div class="modal-kpi-label">EDGE</div>
+        <div class="modal-kpi-val" style="color:var(--green)">+${(o.edge*100).toFixed(1)}%</div>
+      </div>
+      <div class="modal-kpi">
+        <div class="modal-kpi-label">ODD</div>
+        <div class="modal-kpi-val" style="color:var(--text)">${o.odd}</div>
+      </div>
+      <div class="modal-kpi">
+        <div class="modal-kpi-label">CONF.</div>
+        <div class="modal-kpi-val" style="color:${o.confidence==='HIGH'?'var(--green)':o.confidence==='MEDIUM'?'var(--yellow)':'var(--text3)'}">${o.confidence}</div>
+      </div>`;
+
+    const sides = ['home','draw','away'];
+    const labels = ['Casa','Empate','Fora'];
+    document.getElementById('mProbBars').innerHTML = `
+      <div style="margin-bottom:12px;font-family:var(--mono);font-size:10px;color:var(--text3);letter-spacing:0.1em;text-transform:uppercase;">PROBABILIDADES</div>
+      <div class="prob-compare">
+        ${sides.map((s,i) => `
+          <div style="margin-bottom:10px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+              <span style="font-size:12px;color:var(--text2)">${labels[i]}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+              <span style="font-family:var(--mono);font-size:10px;color:var(--green);width:52px;">MODELO</span>
+              <div class="bar-wrap" style="flex:1;height:6px;"><div class="bar-fill green" style="width:${(o.modelProb[s]*100).toFixed(0)}%"></div></div>
+              <span style="font-family:var(--mono);font-size:11px;color:var(--green);width:36px;">${(o.modelProb[s]*100).toFixed(1)}%</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="font-family:var(--mono);font-size:10px;color:var(--text3);width:52px;">MERCADO</span>
+              <div class="bar-wrap" style="flex:1;height:6px;"><div class="bar-fill" style="background:var(--text3);width:${(o.marketProb[s]*100).toFixed(0)}%"></div></div>
+              <span style="font-family:var(--mono);font-size:11px;color:var(--text3);width:36px;">${(o.marketProb[s]*100).toFixed(1)}%</span>
+            </div>
+          </div>`).join('')}
+      </div>`;
+
+    document.getElementById('modal').classList.add('open');
+  }
+
+  function closeModal(e) {
+    if (e.target.id === 'modal') document.getElementById('modal').classList.remove('open');
+  }
+
+  // ── BACKTEST ──
+  function selectBacktestLeague(code, btn) {
+    backtestLeague = code;
+    document.querySelectorAll('[data-league]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  }
+
+  async function loadBacktest() {
+    document.getElementById('btnBacktest').disabled = true;
+    document.getElementById('btnBacktest').textContent = '⏳ Calculando...';
+    document.getElementById('btROI').textContent = '...';
+    document.getElementById('btHitRate').textContent = '...';
+    document.getElementById('btDetails').style.display = 'none';
+
+    try {
+      const res  = await fetch(`${API}/api/backtest?league=${backtestLeague}`);
+      const data = await res.json();
+
+      if (data.error) throw new Error(data.error);
+
+      const roiPct = (data.roi * 100).toFixed(1);
+      const hitPct = (data.hitRate * 100).toFixed(1);
+
+      document.getElementById('btROI').textContent = `+${roiPct}%`;
+      document.getElementById('btROI').className = `big-number ${data.roi > 0 ? 'green' : 'red'}`;
+      document.getElementById('btROISub').textContent = `${data.netUnits > 0 ? '+' : ''}${data.netUnits}u em ${data.bets} apostas`;
+
+      document.getElementById('btHitRate').textContent = `${hitPct}%`;
+      document.getElementById('btHitSub').textContent = `${data.wins} acertos de ${data.gamesTested} jogos`;
+
+      document.getElementById('btDetails').style.display = 'block';
+      document.getElementById('btMetricList').innerHTML = `
+        <div class="metric-row2"><span class="metric-name">Liga</span><span class="metric-val2 white">${backtestLeague}</span></div>
+        <div class="metric-row2"><span class="metric-name">Jogos testados</span><span class="metric-val2 white">${data.gamesTested}</span></div>
+        <div class="metric-row2"><span class="metric-name">Apostas EV+</span><span class="metric-val2 white">${data.bets}</span></div>
+        <div class="metric-row2"><span class="metric-name">Hit Rate</span><span class="metric-val2 ${data.hitRate > 0.5 ? 'green' : 'yellow'}">${hitPct}%</span></div>
+        <div class="metric-row2"><span class="metric-name">ROI</span><span class="metric-val2 ${data.roi > 0 ? 'green' : 'red'}">${roiPct}%</span></div>
+        <div class="metric-row2"><span class="metric-name">Net Units</span><span class="metric-val2 ${data.netUnits > 0 ? 'green' : 'red'}">${data.netUnits > 0 ? '+' : ''}${data.netUnits}u</span></div>
+        <div class="metric-row2"><span class="metric-name">Brier Score</span><span class="metric-val2 white">${data.calibration?.brierScore ?? '—'}</span></div>
+        <div class="metric-row2"><span class="metric-name">Log Loss</span><span class="metric-val2 white">${data.calibration?.logLoss ?? '—'}</span></div>
+        <div class="metric-row2"><span class="metric-name">Accuracy</span><span class="metric-val2 white">${data.calibration?.accuracy ? (data.calibration.accuracy*100).toFixed(1)+'%' : '—'}</span></div>
+        <div class="metric-row2"><span class="metric-name">Odds históricas</span><span class="metric-val2 ${data.hasOddsData?'green':'yellow'}">${data.hasOddsData ? 'Sim ✓' : 'Não (fallback)'}</span></div>`;
+
+    } catch(e) {
+      document.getElementById('btROI').textContent = 'ERRO';
+      document.getElementById('btROISub').textContent = e.message;
+    }
+
+    document.getElementById('btnBacktest').disabled = false;
+    document.getElementById('btnBacktest').textContent = '▶ Rodar';
+  }
+
+  // ── PERFORMANCE ──
+  async function loadPerformance() {
+    try {
+      const res  = await fetch(`${API}/api/performance`);
+      const data = await res.json();
+      const s    = data.summary;
+
+      const roiPct = (s.roi * 100).toFixed(1);
+      const hitPct = (s.hitRate * 100).toFixed(1);
+
+      document.getElementById('perfKpis').innerHTML = `
+        <div class="kpi ${s.netUnits > 0 ? 'accent' : ''}">
+          <div class="kpi-label">Net Units</div>
+          <div class="kpi-val ${s.netUnits > 0 ? 'green' : s.netUnits < 0 ? 'red' : 'white'}">${s.netUnits > 0 ? '+' : ''}${Number(s.netUnits).toFixed(1)}u</div>
+          <div class="kpi-sub">lucro acumulado</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">ROI</div>
+          <div class="kpi-val ${s.roi > 0 ? 'green' : 'yellow'}">${s.roi > 0 ? '+' : ''}${roiPct}%</div>
+          <div class="kpi-sub">retorno sobre investido</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Hit Rate</div>
+          <div class="kpi-val ${s.hitRate >= 0.5 ? 'green' : 'yellow'}">${hitPct}%</div>
+          <div class="kpi-sub">${s.wins} de ${s.totalBets} apostas</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Total apostas</div>
+          <div class="kpi-val white">${s.totalBets}</div>
+          <div class="kpi-sub">com resultado</div>
+        </div>`;
+
+      // Por liga
+      if (data.byLeague?.length) {
+        document.getElementById('perfByLeague').innerHTML = data.byLeague.map(r => `
+          <div class="table-row" style="grid-template-columns:1fr 1fr 1fr 1fr;">
+            <div class="cell-mono" style="font-size:11px;">${r.league}</div>
+            <div class="cell-mono">${r.bets}</div>
+            <div class="cell-mono" style="color:${r.hitRate>=0.5?'var(--green)':'var(--yellow)'}">${(r.hitRate*100).toFixed(0)}%</div>
+            <div class="cell-mono" style="color:${r.netUnits>0?'var(--green)':'var(--red)'}">${r.netUnits>0?'+':''}${Number(r.netUnits).toFixed(1)}</div>
+          </div>`).join('');
+      } else {
+        document.getElementById('perfByLeague').innerHTML = `<div class="empty-state" style="padding:24px;"><div class="empty-title">Sem apostas liquidadas ainda</div></div>`;
+      }
+
+      // Por confiança
+      if (data.byConfidence?.length) {
+        document.getElementById('perfByConf').innerHTML = data.byConfidence.map(r => `
+          <div class="table-row" style="grid-template-columns:1fr 1fr 1fr 1fr;">
+            <div><span class="badge ${r.confidence==='HIGH'?'badge-green':r.confidence==='MEDIUM'?'badge-yellow':'badge-gray'}" style="font-size:9px;">${r.confidence}</span></div>
+            <div class="cell-mono">${r.bets}</div>
+            <div class="cell-mono" style="color:${r.hitRate>=0.5?'var(--green)':'var(--yellow)'}">${(r.hitRate*100).toFixed(0)}%</div>
+            <div class="cell-mono" style="color:${r.netUnits>0?'var(--green)':'var(--red)'}">${r.netUnits>0?'+':''}${Number(r.netUnits).toFixed(1)}</div>
+          </div>`).join('');
+      } else {
+        document.getElementById('perfByConf').innerHTML = `<div class="empty-state" style="padding:24px;"><div class="empty-title">Sem dados ainda</div></div>`;
+      }
+
+    } catch(e) {
+      document.getElementById('perfKpis').innerHTML = `<div class="kpi" style="grid-column:span 4;"><div class="empty-title">Erro ao carregar: ${e.message}</div></div>`;
+    }
+  }
+
+  // ── SETTLE ──
+  async function settleBets() {
+    document.getElementById('btnSettle').disabled = true;
+    document.getElementById('btnSettle').textContent = '⏳ Liquidando...';
+    try {
+      const res  = await fetch(`${API}/api/settle-bets`, { method:'POST' });
+      const data = await res.json();
+      alert(`✅ ${data.settled} apostas liquidadas!`);
+      loadPerformance();
+    } catch(e) {
+      alert('Erro: ' + e.message);
+    }
+    document.getElementById('btnSettle').disabled = false;
+    document.getElementById('btnSettle').textContent = '⚡ Liquidar apostas';
+  }
+
+  // ── SYSTEM ──
+  async function loadSystem() {
+    try {
+      const [health, db] = await Promise.all([
+        fetch(`${API}/api/health`).then(r=>r.json()),
+        fetch(`${API}/api/db-check`).then(r=>r.json()),
+      ]);
+
+      document.getElementById('systemCards').innerHTML = `
+        <div class="status-card">
+          <div class="status-icon">🥚</div>
+          <div class="status-info">
+            <div class="status-name">SERVIDOR</div>
+            <div class="status-detail">localhost:${health.port}</div>
+          </div>
+          <span class="status-badge ok">ONLINE</span>
+        </div>
+        <div class="status-card">
+          <div class="status-icon">🗄️</div>
+          <div class="status-info">
+            <div class="status-name">SUPABASE</div>
+            <div class="status-detail">${db.ok ? new Date(db.databaseTime).toLocaleTimeString('pt-BR') : 'erro'}</div>
+          </div>
+          <span class="status-badge ${db.ok?'ok':'error'}">${db.ok?'ONLINE':'ERRO'}</span>
+        </div>
+        <div class="status-card">
+          <div class="status-icon">⚽</div>
+          <div class="status-info">
+            <div class="status-name">FOOTBALL DATA API</div>
+            <div class="status-detail">${health.hasFootballDataKey ? 'chave configurada' : 'chave ausente'}</div>
+          </div>
+          <span class="status-badge ${health.hasFootballDataKey?'ok':'error'}">${health.hasFootballDataKey?'OK':'ERRO'}</span>
+        </div>
+        <div class="status-card">
+          <div class="status-icon">📊</div>
+          <div class="status-info">
+            <div class="status-name">ODDS API</div>
+            <div class="status-detail">${health.useMockOdds ? 'modo mock ativo' : 'API real ativa'}</div>
+          </div>
+          <span class="status-badge ${health.useMockOdds?'loading':'ok'}">${health.useMockOdds?'MOCK':'REAL'}</span>
+        </div>`;
+
+    } catch(e) {
+      document.getElementById('systemCards').innerHTML = `
+        <div class="status-card" style="grid-column:span 2;">
+          <div class="status-icon">❌</div>
+          <div class="status-info"><div class="status-name">Servidor offline</div><div class="status-detail">${e.message}</div></div>
+          <span class="status-badge error">OFFLINE</span>
+        </div>`;
+      setNavStatus('error', 'offline');
+    }
+  }
+
+  // ── INGEST ──
+  async function ingestLeague(code) {
+    const el = document.getElementById('ingestResult');
+    el.style.color = 'var(--yellow)';
+    el.textContent = `⏳ Ingerindo ${code}...`;
+    try {
+      const res  = await fetch(`${API}/api/ingest/${code}`, { method:'POST' });
+      const data = await res.json();
+      el.style.color = 'var(--green)';
+      el.textContent = `✅ ${code}: ${data.inserted} partidas inseridas`;
+      loadSidebarStats();
+    } catch(e) {
+      el.style.color = 'var(--red)';
+      el.textContent = `❌ Erro: ${e.message}`;
+    }
+  }
+
+  // ── SIDEBAR STATS ──
+
+
+    // Atualiza com valor fixo baseado no que já ingerimos
+    document.getElementById('sbTotalMatches').textContent = '3.502+';
+  
+
+  // ── UTILS ──
+  function leagueName(code) {
+    const map = { PL:'Premier League', SA:'Serie A', PD:'La Liga', BL1:'Bundesliga', FL1:'Ligue 1', BSA:'Brasileirão', DED:'Eredivisie', PPL:'Primeira Liga' };
+    return map[code] || code;
+  }
+
+
+  function loadSidebarStats() {
+  console.log("Sidebar stats carregado")
+}
+
+// ===============================
+// TRADE VIEW (ODDS HISTORY)
+// ===============================
+async function loadOddsHistory(matchId) {
+  try {
+    const res = await fetch(`${API}/api/odds-history/${matchId}`)
+    const data = await res.json()
+
+    console.log("Histórico:", data)
+
+  } catch (e) {
+    console.error("Erro ao carregar histórico:", e)
+  }
+}
+
+  // ── INIT ──
+  loadOpportunities();
+  loadSidebarStats();
+</script>
+</body>
+</html>
